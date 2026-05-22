@@ -54,17 +54,43 @@ def evaluate_daily_momentum(df):
 
 
 # -------------------------------------------------------------------
-# 3. CORE EXECUTION HANDLER
+# 3. DIAGNOSTIC: CHECK MOOMOO ACCOUNT API QUOTA
+# -------------------------------------------------------------------
+def print_moomoo_quota_status(quote_ctx):
+    """Fetches and prints the account's historical candlestick token quota."""
+    print("=" * 75)
+    print("               MOOMOO API QUOTA & ACCOUNT DIAGNOSTICS              ")
+    print("=" * 75)
+    ret_code, data = quote_ctx.get_history_kl_quota()
+    if ret_code == RET_OK:
+        # FIX: Access tuple elements by integer indices
+        used_quota = data[0]
+        remain_quota = data[1]
+
+        print(f" -> Used Quota Stock Count : {used_quota}")
+        print(f" -> Remaining Stock Quota  : {remain_quota}")
+        if remain_quota == 0:
+            print(" ⚠️  WARNING: Your historical data token allowance is completely empty!")
+            print("    You must unlock data permissions or fund your Moomoo account.")
+    else:
+        print(f" ⚠️  CRITICAL: Could not fetch account data status. Gateway error: {data}")
+    print("=" * 75 + "\n")
+
+
+# -------------------------------------------------------------------
+# 4. CORE EXECUTION HANDLER
 # -------------------------------------------------------------------
 def execute_momentum_strategy():
     # Instantiate concurrent connections to local OpenD interface
     quote_ctx = OpenQuoteContext(host=OPEND_HOST, port=OPEND_PORT)
     trade_ctx = OpenSecTradeContext(host=OPEND_HOST, port=OPEND_PORT)
 
+    # Run data permission diagnostics before scanning
+    print_moomoo_quota_status(quote_ctx)
+
     print("=" * 75)
     print("               MOOMOO MOMENTUM SCANNER (DRY RUN ONLY)              ")
     print("=" * 75)
-    # Printed table header for clean data alignment
     print(f"{'SYMBOL':<10} | {'CLOSE':<9} | {'1M MOMENTUM':<12} | {'SIGNAL':<8} | {'PROPOSED ORDER'}")
     print("-" * 75)
 
@@ -75,22 +101,36 @@ def execute_momentum_strategy():
     try:
         for symbol in MY_WATCHLIST:
 
-            # Fetch continuous daily charts
-            ret_code, market_data = quote_ctx.request_history_kline(
+            # Moomoo Native Signature Unpacking format
+            ret_code, data, page_req_key = quote_ctx.request_history_kline(
                 code=symbol,
                 start=start_date_str,
                 end=end_date_str,
                 ktype=KLType.K_DAY  # Enforces daily candlestick rule
             )
 
+            # Handle explicit Moomoo system/connection faults or missing data permissions
             if ret_code != RET_OK:
-                print(f"{symbol:<10} | ERROR     | N/A          | ERROR    | Fetch failed: {market_data}")
+                print(f"{symbol:<10} | ERROR     | N/A          | ERROR    | Reason: {data}")
+                time.sleep(0.5)
                 continue
 
-            df = pd.DataFrame(market_data)
+            # Ensure we have a valid pandas DataFrame to analyze
+            if not isinstance(data, pd.DataFrame) or data.empty:
+                print(f"{symbol:<10} | NO_DATA   | N/A          | SKIP     | Empty payload or None object returned.")
+                time.sleep(0.5)
+                continue
+
+            df = data
             action_signal = evaluate_daily_momentum(df)
             current_close = float(df['close'].iloc[-1])
+
+            # Gracefully handle possible NaN values for momentum presentation
             momentum_val = df['ROC_1M'].iloc[-1]
+            if pd.isna(momentum_val):
+                momentum_str = f"{'N/A':>11}"
+            else:
+                momentum_str = f"{momentum_val:>10.2f}%"
 
             # Determine order text display format
             if action_signal == "BUY":
@@ -101,35 +141,7 @@ def execute_momentum_strategy():
                 order_display = "No Action Required"
 
             # Print neatly structured, aligned data row
-            print(
-                f"{symbol:<10} | ${current_close:<7.2f} | {momentum_val:>10.2f}% | {action_signal:<8} | {order_display}")
-
-            # ---------------------------------------------------------------
-            # 4. ORDER DISPATCH LOGIC (DISABLED / COMMENTED OUT)
-            # ---------------------------------------------------------------
-            # if action_signal in ["BUY", "SELL"]:
-            #     # Unlock trade functions using your account transaction PIN
-            #     unlock_status, unlock_err = trade_ctx.unlock_trade(password="YOUR_6_DIGIT_PIN")
-            #     if unlock_status != RET_OK:
-            #         print(f" -> System Error: Trade unlock failed: {unlock_err}")
-            #         continue
-            #
-            #     order_side = TrdSide.BUY if action_signal == "BUY" else TrdSide.SELL
-            #
-            #     # TrdEnv.SIMULATE sends orders straight to your Moomoo Paper Trading profile
-            #     order_status, order_resp = trade_ctx.place_order(
-            #         price=current_close,
-            #         qty=SHARE_QUANTITY_PER_ORDER,
-            #         code=symbol,
-            #         trd_side=order_side,
-            #         order_type=OrderType.MARKET,
-            #         trd_env=TrdEnv.SIMULATE  # Change to TrdEnv.REAL for live cash trading
-            #     )
-            #
-            #     if order_status == RET_OK:
-            #         print(f" [SUCCESS] Market {order_side} order transmitted for {symbol}")
-            #     else:
-            #         print(f" [FAILED] Order rejected for {symbol}: {order_resp}")
+            print(f"{symbol:<10} | ${current_close:<7.2f} | {momentum_str} | {action_signal:<8} | {order_display}")
 
             # Brief delay prevents hitting Moomoo API gateway frequency throttling thresholds
             time.sleep(0.5)
